@@ -12,8 +12,7 @@ def sampleforcing(sigma : float, nSamples: int, seed: int = 42) -> np.array:
     Ensure that a data1D.mat (mesh locations where the randomly generated chebfun function is sampled at)
     by initializing a Simulator class.
     '"""
-    # matlab_path = "/Applications/MATLAB_R2022a.app/bin/matlab"
-    matlab_path = "/usr/local/MATLAB/R2022b/bin/matlab"
+    matlab_path = "/Applications/MATLAB_R2022a.app/bin/matlab"
     os.system(f"{matlab_path} -nodisplay -nosplash -nodesktop -r \"run('sample1D({int(sigma*10000)},{nSamples},{seed})'); exit;\" | tail -n +11")
     data = scipy.io.loadmat("dat1D.mat")
     forcing = data['F']
@@ -76,6 +75,7 @@ class EGF:
         self.rank = rank
         self.nSens, self.nIO = inputdata.shape
         self.mesh = mesh
+        self.Sim = Sim
 
         # Define the Finite Element Function space used for integration corresponding to the mesh on which the data is
         # sampled.
@@ -148,14 +148,10 @@ class EGF:
             if verbose:
                 print("QR decomposition")
             
-            v = np.zeros(q.shape)
-            for i in range(q.shape[1]):
-                if verbose:
-                    print("Solving again, i = %d / %d" % (i+1,q.shape[1]))
-                if noise_level is not None:
-                    v[:,i] = Sim.solve(q[:,i], noise_level, param)
-                else:
-                    v[:,i] = Sim.solve(q[:,i], None, param)
+            if noise_level is not None:
+                v = Sim.solve(q, noise_level, param)
+            else:
+                v = Sim.solve(q, None, param)
             
             if verbose:
                 print("Size G = %d" %q.shape[0])
@@ -240,6 +236,7 @@ class EGF:
 
             outputdata[:,i] = np.sum(self.modeset[:,:] * modecoeffs, axis = 1)
         return outputdata
+
 
 def compute_order_and_signs(R0: np.array, R1: np.array) -> tuple([np.array, np.array]):
     """ Given two orthonormal matrices R0 and R1, this function computes the "correct" ordering and signs of the columns

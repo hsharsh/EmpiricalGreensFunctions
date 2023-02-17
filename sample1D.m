@@ -1,11 +1,13 @@
 function sample1D(sigma, Nsample, seed)
     rng(seed)
-    dom = [0,1];
-    domain_length = dom(end) - dom(1);
     sigma = sigma/10000;
     
     load('mesh.mat');
     N = size(X,1);
+    
+    dom = [min(X), max(X)];
+    domain_length = dom(end) - dom(1);
+    
     F = zeros(N, Nsample);
     
     K = chebfun2(@(x,y) exp(-(x-y).^2 / (2 * domain_length ^2 * sigma^2)), [dom, dom]);

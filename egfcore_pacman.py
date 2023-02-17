@@ -1,23 +1,31 @@
-from fenics import *
+from firedrake import *
 import numpy as np
-from pandas import array
-import scipy.optimize as sciopt
-import os
+import matplotlib.pyplot as plt
 import scipy.io
+import os
 
-def sampleforcing(sigma : float, nSamples: int, seed: int = 42) -> np.array:
-    """
-    Sample nSamples random functions generated from a GP with squared-exp kernel with length scale
-    parameter sigma using Chebfun.
-    Ensure that a data1D.mat (mesh locations where the randomly generated chebfun function is sampled at)
-    by initializing a Simulator class.
-    '"""
-    # matlab_path = "/Applications/MATLAB_R2022a.app/bin/matlab"
-    matlab_path = "/usr/local/MATLAB/R2022b/bin/matlab"
-    os.system(f"{matlab_path} -nodisplay -nosplash -nodesktop -r \"run('sample1D({int(sigma*10000)},{nSamples},{seed})'); exit;\" | tail -n +11")
-    data = scipy.io.loadmat("dat1D.mat")
-    forcing = data['F']
-    return forcing
+def transform_coordinates(A, theta_1, theta_2):
+    B = A
+    a = (pi-theta_2)/(pi-theta_1)
+    b = pi-a*pi
+    
+    # Change to polar coordinates
+    r = np.sqrt(B[:,0]**2+B[:,1]**2)
+    t = np.arctan2(B[:,1], B[:,0])
+    
+    # Find index of positive y
+    i_p = B[:,1] >= 0
+    i_m = B[:,1] < 0
+    
+    # Interpolate angles
+    t[i_p] = a*t[i_p] + b   
+    t[i_m] = a*t[i_m] - b
+    
+    # Convert to cartesian coordinates
+    B[:,0] = r*np.cos(t)
+    B[:,1] = r*np.sin(t)
+    
+    return B
 
 class EGF:
     def __init__(self,
@@ -77,64 +85,14 @@ class EGF:
         self.nSens, self.nIO = inputdata.shape
         self.mesh = mesh
 
-        # Define the Finite Element Function space used for integration corresponding to the mesh on which the data is
-        # sampled.
-        V = FunctionSpace(mesh,'P',1)
-
         # Compute the weights corresponding to each node in the mesh using FENICS.
-        u = TestFunction(V)
-        temp = assemble(u*dx)
-        self.meshweights = (temp.get_local()[vertex_to_dof_map(V)]).reshape(-1,1)
+        self.meshweights = Sim.meshweights
 
         # Model type "coefficient-fit" computes an Empirical Green's Function by computing the eigenfunction by finding
         # the left singular vectors of the output ensemble, outputdata. Subsequently, the eigenvalues (referred to as
         # coefficients/diagonal coefficients) are fit so that the modeset and the diagonal coefficient construct the
         # spectral decomposition of the Green's function. This is described in more detail in the paper.
-        if type == "coefficient-fit":
-
-            self.signal = outputdata
-            
-            # Find the eigenfunctions for the Empirical Green's Function.
-            u, s, _ = np.linalg.svd(np.sqrt(self.meshweights)*self.signal, full_matrices = False)
-
-            if verbose:
-                print(s[:self.rank])
-
-            self.modeset = u[:,:self.rank]/np.sqrt(self.meshweights) # Truncating at the chosen model rank.
-
-            # Fit the coefficients
-            V = FunctionSpace(mesh, 'P', 1)
-            d2v = dof_to_vertex_map(V)
-
-            numIO = self.nIO
-
-            # The task of finding the set of coefficients is reformulated as solving a system of linear equations.
-            # FENICS is used to integrate to do the reformulation.
-            self.dcoeffs = np.empty((self.rank, 1))
-            A = np.zeros((self.rank, self.rank))
-            b = np.zeros((self.rank, 1))
-            for i in range(numIO):
-                
-                M = np.zeros((self.nSens, self.rank))
-                for mode in range(self.rank):
-                    temp = self.modeset[:,mode]*self.forcing[:,i]
-                    product = Function(V)
-                    product.vector()[:] = temp[d2v]
-                    intval = assemble(product*dx)
-                    M[:,mode] = self.modeset[:,mode]*intval
-
-                # Create the system finding the coefficients for the empirical green's function
-                b += M.T @ self.signal[:,i].reshape((self.nSens,1))
-                A += M.T @ M
-            
-            # Solve the system of linear equation
-            coeffs, _, _, _ = np.linalg.lstsq(A, b, rcond = None)
-
-            self.dcoeffs = coeffs
-
-        # Model type "randomized-svd" uses the work on constructing randomized SVD for learning Hilbert-Schmidt
-        # operators as described in https://arxiv.org/pdf/2105.13052.pdf
-        elif type == "randomized-svd":
+        if type == "randomized-svd":
 
             param = self.params[0]
             self.signal = outputdata
@@ -198,49 +156,117 @@ class EGF:
         else:
             RuntimeError('Unknown model type!')
 
-    def reconstruct_signal(self, forcing: np.array = None) -> np.array:
-        """ For a model of type "coefficient-fit", this function uses the Empirical Green's function to reconstruct the
-        system response by passing the specified forcing. If this is not set, then the model uses the same set of
-        forcing functions which were used to construct the model. 
+#     def reconstruct_signal(self, forcing: np.array = None) -> np.array:
+#         """ For a model of type "coefficient-fit", this function uses the Empirical Green's function to reconstruct the
+#         system response by passing the specified forcing. If this is not set, then the model uses the same set of
+#         forcing functions which were used to construct the model. 
 
-        ----------------------------------------------------------------------------------------------------------------
-        Arguments:
-            forcing: A collection of forcing/input functions sampled at N_sample location. Each discreteized forcing
-                function is repsented by a column vector and these columns are stacked together to create this input
-                ensemble which is an array of size (N_sensors x N_samples). Defaults to None
+#         ----------------------------------------------------------------------------------------------------------------
+#         Arguments:
+#             forcing: A collection of forcing/input functions sampled at N_sample location. Each discreteized forcing
+#                 function is repsented by a column vector and these columns are stacked together to create this input
+#                 ensemble which is an array of size (N_sensors x N_samples). Defaults to None
 
-        ----------------------------------------------------------------------------------------------------------------
-        Returns:
-            A collection of responses where each column, outputdata[:,i], is the response corresponding to forcing[:,i],
-            which is then sampled at N_sensor locations to reconstruct the signal using an Empirical Green's Function.
-            This is an array of size (N_sensors x N_samples).
-        """
-        # Define the Finite Element Function space need to perform the integration over the mesh.
-        V = FunctionSpace(self.mesh, 'P', 1)
-        d2v = dof_to_vertex_map(V)
+#         ----------------------------------------------------------------------------------------------------------------
+#         Returns:
+#             A collection of responses where each column, outputdata[:,i], is the response corresponding to forcing[:,i],
+#             which is then sampled at N_sensor locations to reconstruct the signal using an Empirical Green's Function.
+#             This is an array of size (N_sensors x N_samples).
+#         """
+#         # Define the Finite Element Function space need to perform the integration over the mesh.
+#         V = FunctionSpace(self.mesh, 'P', 1)
+#         d2v = dof_to_vertex_map(V)
         
-        # Set the forcing to inputdata used to fit the model in case it is not specified by the user.
-        if forcing is None:
-            forcing = self.forcing
+#         # Set the forcing to inputdata used to fit the model in case it is not specified by the user.
+#         if forcing is None:
+#             forcing = self.forcing
 
-        outputdata = np.empty((self.nSens, forcing.shape[1]))
+#         outputdata = np.empty((self.nSens, forcing.shape[1]))
 
-        # Use FENICS to evaluate the responses by passing the forcing through an integral with the Empirical Green's
-        # Function as the kernel
-        for i in range(forcing.shape[1]):
-            intvals = np.zeros((self.rank,))
+#         # Use FENICS to evaluate the responses by passing the forcing through an integral with the Empirical Green's
+#         # Function as the kernel
+#         for i in range(forcing.shape[1]):
+#             intvals = np.zeros((self.rank,))
 
-            for mode in range(self.rank):
-                temp = self.modeset[:,mode]*forcing[:,i]
-                product = Function(V)
-                product.vector()[:] = temp[d2v]
-                intvals[mode] = assemble(product*dx)
+#             for mode in range(self.rank):
+#                 temp = self.modeset[:,mode]*forcing[:,i]
+#                 product = Function(V)
+#                 product.vector()[:] = temp[d2v]
+#                 intvals[mode] = assemble(product*dx)
 
-            modecoeffs = (self.dcoeffs.reshape((self.rank,)) * intvals).reshape((self.rank,))
+#             modecoeffs = (self.dcoeffs.reshape((self.rank,)) * intvals).reshape((self.rank,))
 
-            outputdata[:,i] = np.sum(self.modeset[:,:] * modecoeffs, axis = 1)
-        return outputdata
+#             outputdata[:,i] = np.sum(self.modeset[:,:] * modecoeffs, axis = 1)
+#         return outputdata
 
+def sampleforcing2D(sigma, nSamples):
+    """
+    Sample nSamples random functions generated from a GP with squared-exp kernel with length scale parameter sigma using Chebfun.
+    Ensure that a data1D.mat (mesh locations where the randomly generated chebfun function is sampled at) by initializing a Simulator class.
+    """
+    # if not(os.path.exists("dat2D.mat")):
+    matlab_path = "/Applications/MATLAB_R2022a.app/bin/matlab"
+    os.system(f"{matlab_path} -nodisplay -nosplash -nodesktop -r \"run('sample2D({int(sigma*10000)},{nSamples})'); exit;\" | tail -n +11")
+    data = scipy.io.loadmat("dat2D.mat")
+    forcing = data['F']
+    return forcing
+
+class Simulator:
+    
+    def __init__(self, theta):
+        # Define the domain and mesh for the solving the PDE.
+        basemesh = Mesh("pacman.msh")
+        theta_0 = pi/2
+        Vc = basemesh.coordinates.function_space()
+        x, y = SpatialCoordinate(basemesh)
+        m = Function(Vc).interpolate(as_vector([x, y]))
+
+        m.dat.data[:] = transform_coordinates(m.dat.data[:], theta_0/2, theta/2)
+        self.mesh = Mesh(m)      
+        self.V = FunctionSpace(self.mesh, "CG", 3)
+        
+        # Store the meshweights for computation
+        m = self.V.ufl_domain()
+        W = VectorFunctionSpace(m, self.V.ufl_element())
+        X = interpolate(m.coordinates, W)
+        X_samples = X.dat.data_ro
+        mesh_dict = {"X": X_samples}
+        scipy.io.savemat("mesh2D.mat", mesh_dict)
+        v = TestFunction(self.V)
+        temp = assemble(v*dx)
+        self.meshweights = temp.vector().get_local().reshape(-1,1)
+        
+        # Solution to Laplace equation
+        self.u = Function(self.V, name="u")
+        v = TestFunction(self.V)
+        self.f = Function(self.V)
+        
+        # Weak form
+        self.F = inner(grad(self.u),grad(v))*dx - self.f*v*dx
+
+        # Boundary conditions
+        self.bc = [DirichletBC(self.V, Constant(0.0), "on_boundary")]
+
+    
+    def solve(self, forcing, noise_level = None, param = None):
+        """
+        Given a (N_sensors x 1) forcing vector, solve the a 2D Helmholtz problem on a unit disc.
+        """
+        
+        self.f.dat.data[:] = forcing # Instantiate the source term in the variational form by interpolating the sampled sourcing term.
+        # Solve PDE
+        solve(self.F==0, self.u, self.bc)
+
+        # Sample the solution at the nodes of the mesh.
+        solution = self.u.dat.data
+        
+        # As specified, add IID Gaussian white noise.
+        if noise_level is not None:
+            noise =  noise_level*np.random.normal(0,np.abs(solution.mean()),solution.shape)
+            solution += noise
+        
+        return solution
+    
 def compute_order_and_signs(R0: np.array, R1: np.array) -> tuple([np.array, np.array]):
     """ Given two orthonormal matrices R0 and R1, this function computes the "correct" ordering and signs of the columns
     (modes) of R1 using R0 as a reference. The assumption is that these are orthonormal matrices, the columns of which
@@ -324,7 +350,7 @@ def compute_interp_coeffs(models : np.array, targetParam: np.array) -> np.array:
 
     return a
 
-def model_interp(models, Sim, inputdata, targetParam, verbose = False):
+def model_interp(models, inputdata, targetParam, verbose = False):
     """
     Interpolation for the models (orthonormal basis + coefficients). THe orthonormal basis is interpolated in the
     tangent space of compact Stiefel manifold using a QR based retraction map. The coefficients are interpolated
@@ -407,20 +433,35 @@ def model_interp(models, Sim, inputdata, targetParam, verbose = False):
         # Store the learnt empirical Green's function as a modeset and coefficient matrix.
         # U, S, Vt = np.linalg.svd( np.sqrt(models[m].meshweights) * \
         #                                         models[m].G * np.sqrt(models[m].meshweights).T, full_matrices = False)
-        U = models[m].modeset * np.sqrt(model.meshweights)
+        
+        Vc = models[m].mesh.coordinates.function_space()
+        x, y = SpatialCoordinate(models[m].mesh)
+        
+        # Interpolator function for changing mesh coordinates
+        f = Function(Vc).interpolate(as_vector([x, y]))
+        
+        f.dat.data[:] = transform_coordinates(f.dat.data[:], models[m].params[0]/2, models[refIndex].params[0]/2)
+        
+        # Compute determinant of inverse Jacobian of transformation for orthonormalization
+        Vdet = FunctionSpace(models[m].mesh, "CG", 2)
+        detDf = Function(Vdet, name="det").interpolate(det(inv(grad(f))))
+        V1 = FunctionSpace(models[m].mesh, "CG", 3)
+        
+        detDf = Function(V1, name="det").interpolate(sqrt(detDf))
+        
+        U = (detDf.dat.data[:].reshape(-1,1)*models[m].modeset) * np.sqrt(models[m].meshweights)
         dcoeffs = models[m].dcoeffs
         
         # Match the modes and subsequently signs with the basepoint
         order, signs = compute_order_and_signs(U0, U)
         U = U[:,order]*signs
         dcoeffs = dcoeffs[order]
-
-
+        
         # Match the basepoints signs
         for i in range(rank):
             if(U[:,i].T @ U0[:,i] < 0):
                 U[:,i] = -U[:,i]
-
+        
         # Project to tangent space of compact Stiefel manifold.
         P = U - U0 @ (U0.T @ U + U.T @ U0)*0.5 # Project and add along with the weight in the interpolation
         
@@ -436,41 +477,32 @@ def model_interp(models, Sim, inputdata, targetParam, verbose = False):
     # Reorder and flip signs. Note that we haven't seen an instance which requires reordering with a QR based map which
     # indeed an issue in case of an SVD based map.
     order, signs = compute_order_and_signs(U0, modeset)
-
+    
+    Sim = Simulator(targetParam[0])
+    
     modeset = modeset[:,order] * signs
-    modeset = modeset / np.sqrt(model.meshweights)
-    # coeffs_interp = coeffs_interp[order]
+    modeset = modeset / np.sqrt(Sim.meshweights)
+    coeffs_interp = coeffs_interp[order]
+    
+    Vc = Sim.mesh.coordinates.function_space()
+    x, y = SpatialCoordinate(Sim.mesh)
+
+    # Interpolator function for changing mesh coordinates
+    f = Function(Vc).interpolate(as_vector([x, y]))
+
+    f.dat.data[:] = transform_coordinates(f.dat.data[:], models[refIndex].params[0]/2, targetParam[0]/2)
+
+    # Compute determinant of inverse Jacobian of transformation for orthonormalization
+    Vdet = FunctionSpace(Sim.mesh, "CG", 2)
+    detDf = Function(Vdet, name="det").interpolate(det(inv(grad(f))))
+    V1 = FunctionSpace(Sim.mesh, "CG", 3)
+
+    detDf = Function(V1, name="det").interpolate(sqrt(detDf))
+
+    U = (detDf.dat.data[:].reshape(-1,1)*modeset)
+    
 
     # Create an EGF object to return
     interp_model = EGF(None, targetParam, rank, Sim.mesh, inputdata, \
                             None, None, modeset, coeffs_interp, Sim, verbose = False)
     return interp_model, U_set, coeffs_set
-
-def computeEmpiricalError(model, Sim, sigma, nSamples, noise_level = None):
-    seed = 1
-    np.random.seed(1)
-
-    # Generate an forcing and output ensemble for testing
-    forcing = sampleforcing(sigma, nSamples, seed)
-    solution = np.zeros(forcing.shape)
-    for i in range(nSamples):
-        if noise_level is not None:
-            solution[:,i] = Sim.solve(forcing[:,i], noise_level)
-        else:
-            solution[:,i] = Sim.solve(forcing[:,i])
-    
-    reconstruction = model.reconstruct_signal(forcing)
-    
-    error = np.zeros(nSamples)
-    for i in range(nSamples):
-        V = FunctionSpace(Sim.mesh, 'P', 1)
-        d2v = dof_to_vertex_map(V)
-        temp = Function(V)
-        temp.vector()[:] = np.square(reconstruction[:,i] - solution[:,i])[d2v]
-        num = assemble(temp*dx)
-        temp.vector()[:] = np.square(solution[:,i])[d2v]
-        den = assemble(temp*dx)
-        
-        error[i] = np.sqrt(num/den)
-        
-    return error

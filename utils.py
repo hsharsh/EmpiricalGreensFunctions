@@ -5,9 +5,16 @@ def reconstructEGF1D(model):
     G = model.modeset @ np.diag(model.dcoeffs.flatten()) @ model.modeset.T
     return G
 
-def computeError(G_reconstruction, G):
-    # Errors for 1D problems. For 2D problems, one has to compute norm(w * (G_reconstruction-G) * w')/norm(w * G * w')
-    return np.linalg.norm(G_reconstruction - G, ord = 2)/np.linalg.norm(G, ord = 2)
+# def computeError(G_reconstruction, G):
+#     # Errors for 1D problems. For 2D problems, one has to compute norm(w * (G_reconstruction-G) * w')/norm(w * G * w')
+#     return np.linalg.norm(G_reconstruction - G, ord = 2)/np.linalg.norm(G, ord = 2)
+
+def normL2(G, meshweights):
+    meshweights = meshweights.reshape((-1,1))
+    return np.sqrt(np.sum(meshweights * (G*G) * meshweights.T))
+
+def errorL2(G_emp, G, meshweights):
+    return normL2(G_emp-G, meshweights)/normL2(G, meshweights)
 
 def plotGreen1D(model, vmin = None, vmax = None):
     domain = model.mesh.coordinates()
